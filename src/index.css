@@ -1,0 +1,28 @@
+@import "tailwindcss";
+
+:root {
+  font-family: 'Inter', system-ui, Avenir, Helvetica, Arial, sans-serif;
+}
+
+body {
+  margin: 0;
+  background-color: #f8f9fa;
+  color: #1a1f2e;
+}
+
+@theme {
+  --color-navy-primary: #1a1f2e;
+  --color-bg-light: #f8f9fa;
+  --color-gray-soft: #e5e7eb;
+}
+
+@layer utilities {
+  .no-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  .no-scrollbar {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
+  }
+}
