@@ -1,17 +1,20 @@
 import React, { useState, useEffect } from 'react';
 import { X, CheckCircle, Loader2, ChevronDown, Landmark, CreditCard, Send, Sparkles } from 'lucide-react';
 import { db } from '../firebase'
-import { collection, addDoc, runTransaction, doc } from 'firebase/firestore'
+import { collection, addDoc, runTransaction, doc, increment } from 'firebase/firestore'
 
 const TransactionModal = ({ isOpen, onClose, currency, rate, categories, banks, cards, userData }) => {
+    const [formType, setFormType] = useState('Expense');
     const [formData, setFormData] = useState({
         name: '',
         amount: '',
         category: '',
         paymentMethod: 'Bank',
-        paymentSource: '',
         sourceId: '',
+        toPaymentMethod: 'Bank',
+        toSourceId: '',
         date: new Date().toISOString().split('T')[0],
+        interestRate: '',
     });
     const [isSaving, setIsSaving] = useState(false);
     const [isSuccess, setIsSuccess] = useState(false);
@@ -21,114 +24,191 @@ const TransactionModal = ({ isOpen, onClose, currency, rate, categories, banks, 
 
     useEffect(() => {
         if (isOpen) {
-            // Default select first available source
-            if (formData.paymentMethod === 'Bank' && banks.length > 0) {
-                setFormData(prev => ({ ...prev, paymentSource: banks[0].name, sourceId: banks[0].id }));
-            } else if (formData.paymentMethod === 'Card' && cards.length > 0) {
-                setFormData(prev => ({ ...prev, paymentSource: cards[0].name, sourceId: cards[0].id }));
-            }
-            // Default select first available category
-            if (categories.length > 0 && !formData.category) {
-                setFormData(prev => ({ ...prev, category: categories[0].name }));
-            }
+            // Default select exactly to Expense forms to avoid mismatch
+            const expCats = categories.filter(c => c.type === 'Expense' || !c.type);
+            setFormData(prev => ({
+                ...prev,
+                sourceId: banks.length > 0 ? banks[0].id : '',
+                toSourceId: banks.length > 0 ? banks[0].id : '',
+                category: expCats.length > 0 ? expCats[0].name : ''
+            }));
+            setFormType('Expense');
         }
-    }, [isOpen, formData.paymentMethod, banks, cards, categories]);
-
-    const handleMethodChange = (method) => {
-        const source = method === 'Bank' ? banks[0] : cards[0];
-        setFormData(prev => ({
-            ...prev,
-            paymentMethod: method,
-            paymentSource: source?.name || '',
-            sourceId: source?.id || ''
-        }));
-    };
+    }, [isOpen, banks, categories]);
 
     const handleSubmit = async (e) => {
         e.preventDefault();
 
         // Data Validation Guard
-        if (!formData.name.trim() || !formData.sourceId || !formData.category) {
-            setError('Operational Guard: All data fields must be populated.');
-            return;
-        }
-
         const numAmount = parseFloat(formData.amount);
         if (isNaN(numAmount) || numAmount <= 0) {
             setError('Fiscal Guard: Positive numerical values only.');
             return;
         }
 
-        const categoryExists = categories.some(c => c.name === formData.category);
-        const sourceExists = formData.paymentMethod === 'Bank'
-            ? banks.some(b => b.id === formData.sourceId)
-            : cards.some(c => c.id === formData.sourceId);
-
-        if (!categoryExists || !sourceExists) {
-            setError('Sync Guard: Classification or Linked Account has been removed from the registry.');
-            return;
-        }
-
         setIsSaving(true);
         setError('');
 
-        const isIncome = ['Salary', 'Savings', 'Investments', 'Inward'].includes(formData.category);
-        const type = isIncome ? 'Income' : 'Expense';
-
-        // USD base normalization
         const baseAmount = currency === 'PKR' ? numAmount / rate : numAmount;
-        const normalizedAmount = type === 'Income' ? baseAmount : -baseAmount;
+
+        if (formType === 'Internal Transfer' && formData.sourceId === formData.toSourceId) {
+            setError('Fiscal Guard: From Bank and To Bank cannot be exactly identical.');
+            setIsSaving(false);
+            return;
+        }
 
         try {
-            // Atomic Commit Logic
             await runTransaction(db, async (transaction) => {
                 const transRef = doc(collection(db, "transactions"));
+                let finalAmount = baseAmount;
+                let actualType = formType;
+                let finalName = formData.name || formType;
 
-                // Confirm Source Existence within Transaction
-                if (formData.paymentMethod === 'Bank') {
-                    const bankRef = doc(db, "banks", formData.sourceId);
-                    const bankDoc = await transaction.get(bankRef);
-                    if (!bankDoc.exists()) throw new Error("Target Treasury (Bank) not found in cloud registry.");
+                if (formType === 'Income' || formType === 'Expense') {
+                    finalAmount = formType === 'Income' ? baseAmount : -baseAmount;
 
-                    const newBalance = (bankDoc.data().currentBalance || 0) + normalizedAmount;
-                    transaction.update(bankRef, { currentBalance: newBalance });
-                } else {
-                    const cardRef = doc(db, "cards", formData.sourceId);
-                    const cardDoc = await transaction.get(cardRef);
-                    if (!cardDoc.exists()) throw new Error("Target Liability (Card) not found in cloud registry.");
+                    if (formData.paymentMethod === 'Bank') {
+                        if (!formData.sourceId) throw new Error("No primary target selected.");
+                        const bankRef = doc(db, "banks", formData.sourceId);
+                        const bankDoc = await transaction.get(bankRef);
+                        if (!bankDoc.exists()) throw new Error("Target Treasury (Bank) not found in cloud registry.");
+                        transaction.update(bankRef, { currentBalance: increment(finalAmount) });
+                    } else {
+                        if (!formData.sourceId) throw new Error("No primary target selected.");
+                        const cardRef = doc(db, "cards", formData.sourceId);
+                        const spentAdd = Math.abs(finalAmount) * (formType === 'Income' ? -1 : 1);
+                        transaction.update(cardRef, {
+                            spent: increment(spentAdd),
+                            limitLeft: increment(-spentAdd) // Decrement limit by spent amount
+                        });
+                    }
 
-                    const newSpent = (cardDoc.data().spent || 0) + Math.abs(normalizedAmount) * (type === 'Income' ? -1 : 1);
-                    transaction.update(cardRef, { spent: newSpent });
+                    // Action C: Budget Sync (Category Update)
+                    const tMonth = formData.date.substring(0, 7);
+                    const expectedType = formType === 'Income' ? 'Income' : 'Expense';
+                    const matchedCat = categories.find(c => c.name === formData.category && (c.type === expectedType || !c.type) && (c.month === tMonth || !c.month));
+
+                    if (matchedCat) {
+                        const catRef = doc(db, "categories", matchedCat.id);
+                        if (formType === 'Income') {
+                            transaction.update(catRef, { received: increment(Math.abs(baseAmount)) });
+                        } else {
+                            transaction.update(catRef, { spent: increment(Math.abs(baseAmount)) });
+                        }
+                        formData.categoryId = matchedCat.id; // Map exact ID explicitly
+                    }
+                }
+                else if (formType === 'Internal Transfer') {
+                    finalAmount = -baseAmount; // Record negative on source
+                    if (!formData.sourceId || !formData.toSourceId) throw new Error("Transfer targets missing");
+
+                    const isSrcBank = banks.some(b => b.id === formData.sourceId);
+                    const isDestBank = banks.some(b => b.id === formData.toSourceId);
+
+                    // Action A: Source -> Subtract amount
+                    if (isSrcBank) {
+                        transaction.update(doc(db, "banks", formData.sourceId), { currentBalance: increment(-baseAmount) });
+                    } else {
+                        transaction.update(doc(db, "cards", formData.sourceId), { spent: increment(baseAmount), limitLeft: increment(-baseAmount) });
+                    }
+
+                    // Action B: Destination -> Add amount
+                    if (isDestBank) {
+                        transaction.update(doc(db, "banks", formData.toSourceId), { currentBalance: increment(baseAmount) });
+                    } else {
+                        transaction.update(doc(db, "cards", formData.toSourceId), { spent: increment(-baseAmount), limitLeft: increment(baseAmount) });
+                    }
+
+                    finalName = formData.name || `Internal Transfer`;
+                }
+                else if (formType === 'Credit Card Payment') {
+                    finalAmount = -baseAmount; // Negative on Bank
+                    if (!formData.sourceId || !formData.toSourceId) throw new Error("Payment targets missing");
+
+                    // Action A: Debit Bank
+                    const bRef = doc(db, "banks", formData.sourceId);
+                    transaction.update(bRef, { currentBalance: increment(-baseAmount) });
+
+                    // Action B: Credit Card
+                    const cRef = doc(db, "cards", formData.toSourceId);
+                    transaction.update(cRef, {
+                        spent: increment(-baseAmount),
+                        limitLeft: increment(baseAmount), // Return limit upon payment
+                        paymentReceived: increment(baseAmount)
+                    });
+
+                    // Action C: Budget Sync (Category Update)
+                    const tMonth = formData.date.substring(0, 7);
+                    const matchedCat = categories.find(c => c.name === formData.category && (c.type === 'Expense' || !c.type) && (c.month === tMonth || !c.month));
+
+                    if (matchedCat) {
+                        const catRef = doc(db, "categories", matchedCat.id);
+                        transaction.update(catRef, { spent: increment(baseAmount) });
+                        formData.categoryId = matchedCat.id; // Map exact ID explicitly
+                    }
+
+                    finalName = formData.name || 'Card Payment Settlement';
+                }
+                else if (formType === 'Loan') {
+                    finalAmount = -baseAmount; // Assuming giving loan reduces your bank
+
+                    if (!formData.name) throw new Error("Lender name required");
+                    if (!formData.sourceId) throw new Error("Funding source missing");
+
+                    const lRef = doc(collection(db, "loans"));
+                    transaction.set(lRef, {
+                        personName: formData.name,
+                        totalLoanAmount: baseAmount,
+                        amountPaid: 0,
+                        remainingBalance: baseAmount,
+                        interestRate: formData.interestRate || '',
+                        dueDate: formData.date
+                    });
+
+                    const bRef = doc(db, "banks", formData.sourceId);
+                    const bDoc = await transaction.get(bRef);
+                    if (bDoc.exists()) transaction.update(bRef, { currentBalance: (bDoc.data().currentBalance || 0) - baseAmount });
+
+                    finalName = `Loan to ${formData.name}`;
                 }
 
                 transaction.set(transRef, {
-                    ...formData,
-                    amount: normalizedAmount,
-                    type,
+                    name: finalName,
+                    amount: finalAmount,
+                    category: (formType === 'Income' || formType === 'Expense' || formType === 'Credit Card Payment') ? formData.category : formType,
+                    categoryId: formData.categoryId || null,
+                    bankId: formData.sourceId || null,
+                    cardId: formType === 'Credit Card Payment' ? formData.toSourceId : null,
+                    fromBankID: formType === 'Internal Transfer' ? formData.sourceId : null,
+                    toBankID: formType === 'Internal Transfer' ? formData.toSourceId : null,
+                    paymentMethod: formData.paymentMethod || 'Bank',
+                    type: actualType,
                     createdAt: new Date().toISOString(),
+                    date: formData.date,
                     syncStatus: 'COMMITTED'
                 });
             });
 
-            // Success Transition
             setIsSuccess(true);
             setTimeout(() => {
                 setIsSuccess(false);
                 setIsSaving(false);
+                const expCats = categories.filter(c => c.type === 'Expense' || !c.type);
                 setFormData({
                     name: '',
                     amount: '',
-                    category: categories[0]?.name || '',
+                    category: expCats.length > 0 ? expCats[0].name : '',
                     paymentMethod: 'Bank',
-                    paymentSource: banks[0]?.name || '',
                     sourceId: banks[0]?.id || '',
+                    toPaymentMethod: 'Bank',
+                    toSourceId: banks[0]?.id || '',
                     date: new Date().toISOString().split('T')[0],
+                    interestRate: '',
                 });
                 onClose();
             }, 1000);
 
         } catch (err) {
-            // High-fidelity error reporting
             const errMsg = err.message || "Cloud Transaction Failure";
             console.error(`[CLOUD ERROR]: ${errMsg}`, err);
             setError(`CLOUD FAILURE: ${errMsg}`);
@@ -166,105 +246,206 @@ const TransactionModal = ({ isOpen, onClose, currency, rate, categories, banks, 
 
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                             <div className="md:col-span-2">
-                                <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Log Description</label>
-                                <input
-                                    type="text"
-                                    required
-                                    value={formData.name}
-                                    onChange={(e) => setFormData({ ...formData, name: e.target.value })}
-                                    className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl focus:border-[#1a1f2e] focus:ring-4 focus:ring-[#1a1f2e]/5 outline-none text-[#1a1f2e] font-black transition-all"
-                                    placeholder="Source of funds or expense..."
-                                />
-                            </div>
-
-                            <div>
-                                <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Flow Amount ({symbol})</label>
-                                <input
-                                    type="number"
-                                    required
-                                    step="0.01"
-                                    value={formData.amount}
-                                    onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
-                                    className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl focus:border-[#1a1f2e] outline-none font-black text-[#1a1f2e]"
-                                    placeholder="0.00"
-                                />
-                            </div>
-
-                            <div className="relative">
-                                <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Classification</label>
-                                <select
-                                    value={formData.category}
-                                    onChange={(e) => setFormData({ ...formData, category: e.target.value })}
-                                    className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] cursor-pointer hover:border-[#1a1f2e] text-sm uppercase"
-                                    required
-                                >
-                                    {(() => {
-                                        const uniqueCategories = Array.from(new Map(categories.map(c => [c.name, c])).values());
-                                        return uniqueCategories.length > 0 ? (
-                                            uniqueCategories.map(cat => (
-                                                <option key={cat.id} value={cat.name}>{cat.name}</option>
-                                            ))
-                                        ) : (
-                                            <option disabled>Syncing Cloud...</option>
-                                        );
-                                    })()}
-                                </select>
-                                <div className="absolute right-5 top-11 pointer-events-none text-gray-300">
-                                    <ChevronDown size={18} />
-                                </div>
-                            </div>
-
-                            <div className="md:col-span-2">
-                                <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Asset Allocation</label>
-                                <div className="flex gap-3">
-                                    <button
-                                        type="button"
-                                        onClick={() => handleMethodChange('Bank')}
-                                        className={`flex-1 flex items-center justify-center gap-2 py-4 rounded-xl border font-black transition-all uppercase text-[9px] tracking-widest ${formData.paymentMethod === 'Bank' ? 'bg-[#1a1f2e] text-white border-[#1a1f2e] shadow-lg' : 'bg-gray-50 text-gray-400 border-gray-100 hover:bg-white'}`}
+                                <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Transaction Type</label>
+                                <div className="relative">
+                                    <select
+                                        value={formType}
+                                        onChange={(e) => {
+                                            const newType = e.target.value;
+                                            setFormType(newType);
+                                            // Real-time Mapping FIx
+                                            if (newType === 'Income') {
+                                                const incCats = categories.filter(c => c.type === 'Income');
+                                                setFormData({ ...formData, category: incCats.length ? incCats[0].name : '' });
+                                            } else if (newType === 'Expense') {
+                                                const expCats = categories.filter(c => c.type === 'Expense' || !c.type);
+                                                setFormData({ ...formData, category: expCats.length ? expCats[0].name : '' });
+                                            } else if (newType === 'Credit Card Payment') {
+                                                const expCats = categories.filter(c => c.type === 'Expense');
+                                                const ccCards = cards.filter(c => c.type === 'Credit Card');
+                                                setFormData({
+                                                    ...formData,
+                                                    category: expCats.length ? expCats[0].name : '',
+                                                    toSourceId: ccCards.length ? ccCards[0].id : ''
+                                                });
+                                            } else if (newType === 'Internal Transfer') {
+                                                const allAccounts = [...banks, ...cards];
+                                                setFormData({
+                                                    ...formData,
+                                                    sourceId: allAccounts.length > 0 ? allAccounts[0].id : '',
+                                                    toSourceId: allAccounts.length > 1 ? allAccounts[1].id : (allAccounts.length > 0 ? allAccounts[0].id : '')
+                                                });
+                                            }
+                                        }}
+                                        className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] cursor-pointer hover:border-[#1a1f2e] text-sm uppercase transition-all"
                                     >
-                                        <Landmark size={18} />
-                                        <span>Treasury</span>
-                                    </button>
-                                    <button
-                                        type="button"
-                                        onClick={() => handleMethodChange('Card')}
-                                        className={`flex-1 flex items-center justify-center gap-2 py-4 rounded-xl border font-black transition-all uppercase text-[9px] tracking-widest ${formData.paymentMethod === 'Card' ? 'bg-[#1a1f2e] text-white border-[#1a1f2e] shadow-lg' : 'bg-gray-50 text-gray-400 border-gray-100 hover:bg-white'}`}
-                                    >
-                                        <CreditCard size={18} />
-                                        <span>Liability</span>
-                                    </button>
+                                        <option value="Income">🟢 Income</option>
+                                        <option value="Expense">🔴 Expense</option>
+                                        <option value="Credit Card Payment">💳 Credit Card Payment</option>
+                                        <option value="Internal Transfer">🔄 Internal Transfer</option>
+                                        <option value="Loan">🏦 Loan</option>
+                                    </select>
+                                    <div className="absolute right-5 top-1/2 -translate-y-1/2 pointer-events-none text-gray-300">
+                                        <ChevronDown size={18} />
+                                    </div>
                                 </div>
                             </div>
 
-                            <div className="relative">
-                                <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Linked Account</label>
-                                <select
-                                    value={formData.sourceId}
-                                    onChange={(e) => {
-                                        const selected = (formData.paymentMethod === 'Bank' ? banks : cards).find(item => item.id === e.target.value);
-                                        setFormData({ ...formData, sourceId: e.target.value, paymentSource: selected?.name || '' });
-                                    }}
-                                    className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] text-sm cursor-pointer hover:border-[#1a1f2e] uppercase"
-                                    required
-                                >
-                                    {(formData.paymentMethod === 'Bank' ? banks : cards).map(item => (
-                                        <option key={item.id} value={item.id}>{item.name}</option>
-                                    ))}
-                                </select>
-                                <div className="absolute right-5 top-11 pointer-events-none text-gray-300">
-                                    <ChevronDown size={18} />
-                                </div>
-                            </div>
+                            {/* CONDITIONAL FORMS BELOW */}
+                            {formType === 'Expense' && (
+                                <>
+                                    <div className="md:col-span-2">
+                                        <label className="block text-[10px] font-black text-rose-600 mb-3 uppercase tracking-widest ml-1">Expense Amount ({symbol})</label>
+                                        <input type="number" step="0.01" required value={formData.amount} onChange={(e) => setFormData({ ...formData, amount: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-rose-100 rounded-xl focus:border-rose-500 outline-none font-black text-rose-600" placeholder="0.00" />
+                                    </div>
+                                    <div className="md:col-span-2">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Transaction Description</label>
+                                        <input type="text" required value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl focus:border-[#1a1f2e] outline-none font-black" placeholder="Groceries, Electricity Bill..." />
+                                    </div>
+                                    <div className="relative">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Transaction Category</label>
+                                        <select value={formData.category} onChange={(e) => setFormData({ ...formData, category: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-rose-500 text-sm uppercase">
+                                            {Array.from(new Map(categories.filter(c => c.type === 'Expense' || !c.type).map(c => [c.name, c])).values()).map(cat => <option key={cat.id} value={cat.name}>{cat.name}</option>)}
+                                        </select>
+                                        <ChevronDown size={18} className="absolute right-5 top-11 pointer-events-none text-gray-300" />
+                                    </div>
+                                    <div className="relative">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Bank</label>
+                                        <select value={formData.sourceId} onChange={(e) => setFormData({ ...formData, sourceId: e.target.value, paymentMethod: 'Bank' })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] text-sm uppercase">
+                                            {banks.map(b => <option key={b.id} value={b.id}>{b.name} (Bank)</option>)}
+                                        </select>
+                                        <ChevronDown size={18} className="absolute right-5 top-11 pointer-events-none text-gray-300" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Effective Date</label>
+                                        <input type="date" required value={formData.date} onChange={(e) => setFormData({ ...formData, date: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none font-black text-[#1a1f2e]" />
+                                    </div>
+                                </>
+                            )}
 
-                            <div>
-                                <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Effective Date</label>
-                                <input
-                                    type="date"
-                                    value={formData.date}
-                                    onChange={(e) => setFormData({ ...formData, date: e.target.value })}
-                                    className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none font-black text-[#1a1f2e]"
-                                />
-                            </div>
+                            {formType === 'Income' && (
+                                <>
+                                    <div className="md:col-span-2">
+                                        <label className="block text-[10px] font-black text-emerald-600 mb-3 uppercase tracking-widest ml-1">Income Amount ({symbol})</label>
+                                        <input type="number" step="0.01" required value={formData.amount} onChange={(e) => setFormData({ ...formData, amount: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-emerald-100 rounded-xl focus:border-emerald-500 outline-none font-black text-emerald-600" placeholder="0.00" />
+                                    </div>
+                                    <div className="md:col-span-2">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Transaction Description</label>
+                                        <input type="text" required value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl focus:border-[#1a1f2e] outline-none font-black" placeholder="Salary, Bonus, Sell..." />
+                                    </div>
+                                    <div className="relative">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Income Category</label>
+                                        <select value={formData.category} onChange={(e) => setFormData({ ...formData, category: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-emerald-500 text-sm uppercase">
+                                            {Array.from(new Map(categories.filter(c => c.type === 'Income').map(c => [c.name, c])).values()).map(cat => <option key={cat.id} value={cat.name}>{cat.name}</option>)}
+                                        </select>
+                                        <ChevronDown size={18} className="absolute right-5 top-11 pointer-events-none text-gray-300" />
+                                    </div>
+                                    <div className="relative">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Destination Bank</label>
+                                        <select value={formData.sourceId} onChange={(e) => setFormData({ ...formData, sourceId: e.target.value, paymentMethod: 'Bank' })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] text-sm uppercase">
+                                            {banks.map(b => <option key={b.id} value={b.id}>{b.name} (Bank)</option>)}
+                                        </select>
+                                        <ChevronDown size={18} className="absolute right-5 top-11 pointer-events-none text-gray-300" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Effective Date</label>
+                                        <input type="date" required value={formData.date} onChange={(e) => setFormData({ ...formData, date: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none font-black text-[#1a1f2e]" />
+                                    </div>
+                                </>
+                            )}
+
+                            {formType === 'Internal Transfer' && (
+                                <>
+                                    <div className="md:col-span-2">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Transfer Amount ({symbol})</label>
+                                        <input type="number" step="0.01" required value={formData.amount} onChange={(e) => setFormData({ ...formData, amount: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl focus:border-[#1a1f2e] outline-none font-black text-[#1a1f2e]" placeholder="0.00" />
+                                    </div>
+                                    <div className="relative text-[#1a1f2e]">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">From Bank</label>
+                                        <select value={formData.sourceId} onChange={(e) => setFormData({ ...formData, sourceId: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] text-sm uppercase">
+                                            {[...banks, ...cards].map(item => <option key={item.id} value={item.id}>{item.name} ({item.type || 'Bank'})</option>)}
+                                        </select>
+                                        <ChevronDown size={18} className="absolute right-5 top-11 pointer-events-none text-gray-300" />
+                                    </div>
+                                    <div className="relative text-[#1a1f2e]">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">To Bank</label>
+                                        <select value={formData.toSourceId} onChange={(e) => setFormData({ ...formData, toSourceId: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] text-sm uppercase">
+                                            {[...banks, ...cards].map(item => <option key={item.id} value={item.id}>{item.name} ({item.type || 'Bank'})</option>)}
+                                        </select>
+                                        <ChevronDown size={18} className="absolute right-5 top-11 pointer-events-none text-gray-300" />
+                                    </div>
+                                    <div className="md:col-span-2">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Transfer Date</label>
+                                        <input type="date" required value={formData.date} onChange={(e) => setFormData({ ...formData, date: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none font-black text-[#1a1f2e]" />
+                                    </div>
+                                </>
+                            )}
+
+                            {formType === 'Credit Card Payment' && (
+                                <>
+                                    <div className="md:col-span-2">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Payment Amount ({symbol})</label>
+                                        <input type="number" step="0.01" required value={formData.amount} onChange={(e) => setFormData({ ...formData, amount: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl focus:border-[#1a1f2e] outline-none font-black text-[#1a1f2e]" placeholder="0.00" />
+                                    </div>
+                                    <div className="relative text-[#1a1f2e]">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Which Card?</label>
+                                        <select value={formData.toSourceId} onChange={(e) => setFormData({ ...formData, toSourceId: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] text-sm uppercase">
+                                            {cards.filter(c => c.type === 'Credit Card').map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+                                        </select>
+                                        <ChevronDown size={18} className="absolute right-5 top-11 pointer-events-none text-gray-300" />
+                                    </div>
+                                    <div className="relative text-[#1a1f2e]">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">From Bank</label>
+                                        <select value={formData.sourceId} onChange={(e) => setFormData({ ...formData, sourceId: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] text-sm uppercase">
+                                            {banks.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+                                        </select>
+                                        <ChevronDown size={18} className="absolute right-5 top-11 pointer-events-none text-gray-300" />
+                                    </div>
+                                    <div className="md:col-span-2 relative text-[#1a1f2e]">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Transaction Category</label>
+                                        <select value={formData.category} onChange={(e) => setFormData({ ...formData, category: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] text-sm uppercase">
+                                            {Array.from(new Map(categories.filter(c => c.type === 'Expense').map(c => [c.name, c])).values()).map(cat => <option key={cat.id} value={cat.name}>{cat.name}</option>)}
+                                        </select>
+                                        <ChevronDown size={18} className="absolute right-5 top-11 pointer-events-none text-gray-300" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Payment Date</label>
+                                        <input type="date" required value={formData.date} onChange={(e) => setFormData({ ...formData, date: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none font-black text-[#1a1f2e]" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Reference</label>
+                                        <input type="text" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none font-black" placeholder="Optional reference..." />
+                                    </div>
+                                </>
+                            )}
+
+                            {formType === 'Loan' && (
+                                <>
+                                    <div className="md:col-span-2">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Loan Amount ({symbol})</label>
+                                        <input type="number" step="0.01" required value={formData.amount} onChange={(e) => setFormData({ ...formData, amount: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl focus:border-[#1a1f2e] outline-none font-black text-[#1a1f2e]" placeholder="0.00" />
+                                    </div>
+                                    <div className="md:col-span-1">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Lender Name</label>
+                                        <input type="text" required value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none font-black text-[#1a1f2e]" placeholder="Who is the loan for?" />
+                                    </div>
+                                    <div className="md:col-span-1">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Interest Rate (%)</label>
+                                        <input type="number" value={formData.interestRate} onChange={(e) => setFormData({ ...formData, interestRate: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none font-black text-[#1a1f2e]" placeholder="Optional" />
+                                    </div>
+                                    <div className="relative">
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Fund Source</label>
+                                        <select value={formData.sourceId} onChange={(e) => setFormData({ ...formData, sourceId: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] text-sm uppercase">
+                                            {banks.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}
+                                        </select>
+                                        <ChevronDown size={18} className="absolute right-5 top-11 pointer-events-none text-gray-300" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-[10px] font-black text-gray-400 mb-3 uppercase tracking-widest ml-1">Due Date</label>
+                                        <input type="date" required value={formData.date} onChange={(e) => setFormData({ ...formData, date: e.target.value })} className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none font-black text-[#1a1f2e]" />
+                                    </div>
+                                </>
+                            )}
                         </div>
 
                         <button

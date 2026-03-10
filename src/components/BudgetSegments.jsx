@@ -86,17 +86,30 @@ const BudgetSegments = ({ currency, rate, externalTransactions, categories }) =>
         const stats = categories
             .filter(cat => (cat.month || activeCurrentMonth) === selectedMonth)
             .map(cat => {
-                const spent = externalTransactions
-                    .filter(t => t.category === cat.name && t.date.startsWith(selectedMonth) && (t.amount || 0) < 0)
-                    .reduce((acc, curr) => acc + Math.abs(curr.amount || 0), 0);
+                const isIncome = cat.type === 'Income';
+
+                // Firestore exact map reading (supports increment atomic updates seamlessly)
+                let calculatedSpent = isIncome ? (cat.received || 0) : (cat.spent || 0);
+
+                // Fallback rendering for old, unmapped array nodes
+                if (!cat.received && !cat.spent && externalTransactions) {
+                    calculatedSpent = externalTransactions
+                        .filter(t => t.category === cat.name && t.date.startsWith(selectedMonth))
+                        .reduce((acc, curr) => {
+                            const amt = curr.amount || 0;
+                            if (isIncome && amt > 0) return acc + amt;
+                            if (!isIncome && amt < 0) return acc + Math.abs(amt);
+                            return acc;
+                        }, 0);
+                }
 
                 return {
                     ...cat,
-                    spent,
-                    percent: cat.monthlyLimit > 0 ? Math.round((spent / cat.monthlyLimit) * 100) : 0
+                    spent: calculatedSpent,
+                    percent: cat.monthlyLimit > 0 ? Math.round((calculatedSpent / cat.monthlyLimit) * 100) : 0
                 };
             });
-        return stats.filter(s => s.type === 'Expense');
+        return stats;
     };
 
     let categoryStats = calculateCategoryStats();
@@ -195,23 +208,29 @@ const BudgetSegments = ({ currency, rate, externalTransactions, categories }) =>
                                             </div>
                                         </div>
                                         <div className="space-y-1">
-                                            <p className="text-xl font-black text-navy-primary tracking-tighter">
-                                                {symbol}{convert(stat.spent).toLocaleString()} <span className="text-[10px] text-gray-300 font-bold uppercase tracking-widest">Spent</span>
+                                            <p className={`text-xl font-black tracking-tighter ${stat.type === 'Income' ? 'text-emerald-500' : 'text-navy-primary'}`}>
+                                                {symbol}{convert(stat.spent).toLocaleString()} <span className="text-[10px] text-gray-300 font-bold uppercase tracking-widest">{stat.type === 'Income' ? 'Received' : 'Spent'}</span>
                                             </p>
-                                            <p className={`text-sm font-black tracking-tight ${remaining < 0 ? 'text-rose-500' : 'text-emerald-500'}`}>
-                                                {symbol}{convert(remaining).toLocaleString()} <span className="text-[9px] opacity-40 uppercase tracking-widest leading-none">Left</span>
+                                            <p className={`text-sm font-black tracking-tight ${stat.type === 'Income'
+                                                ? remaining <= 0 ? 'text-emerald-500' : 'text-gray-400'
+                                                : remaining < 0 ? 'text-rose-500' : 'text-emerald-500'
+                                                }`}>
+                                                {symbol}{convert(Math.abs(remaining)).toLocaleString()} <span className="text-[9px] opacity-40 uppercase tracking-widest leading-none">{stat.type === 'Income' ? (remaining <= 0 ? 'Over Target' : 'Left') : (remaining < 0 ? 'Over' : 'Left')}</span>
                                             </p>
                                         </div>
                                     </div>
                                 </div>
                                 <div className="mt-4">
                                     <div className="flex justify-between text-[10px] font-bold uppercase tracking-widest text-gray-400 mb-1">
-                                        <span>Limit: {symbol}{convert(stat.monthlyLimit || 0).toLocaleString()}</span>
+                                        <span>{stat.type === 'Income' ? 'Target' : 'Limit'}: {symbol}{convert(stat.monthlyLimit || 0).toLocaleString()}</span>
                                         <span>{stat.percent}%</span>
                                     </div>
                                     <div className="w-full bg-gray-50 h-2 rounded-full overflow-hidden border border-gray-100 shadow-inner relative z-10">
                                         <div
-                                            className={`h-full rounded-full transition-all duration-1000 ${stat.percent > 90 ? 'bg-red-500 shadow-xl' : 'bg-[#1a1f2e] shadow-lg'}`}
+                                            className={`h-full rounded-full transition-all duration-1000 ${stat.type === 'Income'
+                                                ? stat.percent >= 100 ? 'bg-emerald-500 shadow-xl' : 'bg-emerald-400 shadow-lg'
+                                                : stat.percent > 90 ? 'bg-red-500 shadow-xl' : 'bg-[#1a1f2e] shadow-lg'
+                                                }`}
                                             style={{ width: `${Math.min(stat.percent, 100)}%` }}
                                         ></div>
                                     </div>

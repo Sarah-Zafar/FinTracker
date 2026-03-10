@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
 import { db } from './firebase'
-import { collection, onSnapshot, query, orderBy, doc, setDoc, addDoc, deleteDoc, runTransaction } from 'firebase/firestore'
+import { collection, onSnapshot, query, orderBy, doc, setDoc, addDoc, deleteDoc, runTransaction, increment } from 'firebase/firestore'
+import { signOut } from 'firebase/auth'
 import Sidebar from './components/Sidebar'
 import Dashboard from './components/Dashboard'
 import Transactions from './components/Transactions'
@@ -101,24 +102,115 @@ function App() {
     }
   };
 
-  const handleDeleteTransaction = async (transaction) => {
+  const handleDeleteTransaction = async (t) => {
     try {
-      const transRef = doc(db, "transactions", transaction.id);
-      await deleteDoc(transRef);
+      await runTransaction(db, async (transaction) => {
+        const transRef = doc(db, "transactions", t.id);
+
+        const transDoc = await transaction.get(transRef);
+        if (!transDoc.exists()) throw new Error("Transaction not found in ledger prior to deletion.");
+        const tData = transDoc.data();
+
+        // Atomic Reverse Ledger Sync
+        const baseAmount = Math.abs(tData.amount || 0);
+        const tType = tData.type;
+
+        if (tType === 'Income' || tType === 'Expense') {
+          // 1. Unwind Bank Balance
+          if (tData.bankId) {
+            // Income originally raised balance -> so subtract. Expense originally lowered balance -> so add.
+            const reversalAmount = tType === 'Income' ? -baseAmount : baseAmount;
+            const bankRef = doc(db, "banks", tData.bankId);
+            transaction.update(bankRef, { currentBalance: increment(reversalAmount) });
+          }
+
+          // 2. Unwind Budget Category Sync
+          if (tData.categoryId) {
+            const catRef = doc(db, "categories", tData.categoryId);
+            if (tType === 'Income') {
+              transaction.update(catRef, { received: increment(-baseAmount) });
+            } else if (tType === 'Expense') {
+              transaction.update(catRef, { spent: increment(-baseAmount) });
+            }
+          }
+        } else if (tType === 'Credit Card Payment') {
+          // Action A (Reverse): Bank -> Add the amount back
+          if (tData.bankId) {
+            const bankRef = doc(db, "banks", tData.bankId);
+            transaction.update(bankRef, { currentBalance: increment(baseAmount) });
+          }
+
+          // Action B (Reverse): Credit Card -> Subtract paymentReceived, subtract limitLeft
+          if (tData.cardId) {
+            const cRef = doc(db, "cards", tData.cardId);
+            transaction.update(cRef, {
+              limitLeft: increment(-baseAmount),
+              paymentReceived: increment(-baseAmount),
+              spent: increment(baseAmount) // revert spent balance logic
+            });
+          }
+
+          // Action C (Reverse): Budget Category Sync -> Subtract from category spent
+          if (tData.categoryId) {
+            const catRef = doc(db, "categories", tData.categoryId);
+            transaction.update(catRef, { spent: increment(-baseAmount) });
+          }
+        } else if (tType === 'Internal Transfer') {
+          const fromID = tData.fromBankID || tData.bankId;
+          const toID = tData.toBankID || tData.toBankId;
+
+          if (!fromID || !toID) {
+            throw new Error("Internal Transfer is missing designated 'fromBankID' or 'toBankID' markers. Reversal cannot process.");
+          }
+
+          // Reverse From Bank (Add amount back)
+          const isSrcBank = banks.some(b => b.id === fromID);
+          if (isSrcBank) {
+            transaction.update(doc(db, "banks", fromID), { currentBalance: increment(baseAmount) });
+          } else {
+            transaction.update(doc(db, "cards", fromID), { spent: increment(-baseAmount), limitLeft: increment(baseAmount) });
+          }
+
+          // Reverse To Bank (Subtract amount)
+          const isDestBank = banks.some(b => b.id === toID);
+          if (isDestBank) {
+            transaction.update(doc(db, "banks", toID), { currentBalance: increment(-baseAmount) });
+          } else {
+            transaction.update(doc(db, "cards", toID), { spent: increment(baseAmount), limitLeft: increment(-baseAmount) });
+          }
+        }
+
+        // 3. Erase Transaction Node permanently
+        transaction.delete(transRef);
+      });
     } catch (err) {
-      console.error("Deletion/Sync Failure:", err);
-      alert("Operational Failure: Could not remove transaction from cloud. Please check connectivity.");
+      console.error("Deletion/Reverse Sync Failure:", err);
+      alert("Operational Failure: Could not remove transaction and safely reverse ledgers. Check connectivity.");
     }
   };
 
   const handleCurrencySelect = (selectedCurrency) => setCurrency(selectedCurrency);
   const toggleCurrency = () => setCurrency(prev => prev === 'USD' ? 'PKR' : 'USD');
 
+  const handleLogout = async () => {
+    try {
+      const { auth } = await import('./firebase');
+      await signOut(auth);
+    } catch (error) {
+      console.error("Firebase logout failed:", error);
+    }
+    localStorage.removeItem('fintrackerAuth');
+    setIsAuthenticated(false);
+  };
+
   const calculateDashboardData = () => {
     if (!userData) return null;
 
-    // Use manually set totalDebt from Firestore if available, otherwise aggregate
-    const aggregateDebt = cards.reduce((acc, curr) => acc + (curr.spent || 0), 0);
+    const aggregateDebt = cards.reduce((acc, curr) => {
+      const _creditLimit = curr.creditLimit || curr.limit || 0;
+      const _limitLeft = curr.limitLeft !== undefined ? curr.limitLeft : (_creditLimit - (curr.spent || 0));
+      return acc + (_creditLimit - _limitLeft);
+    }, 0);
     const totalDebt = userData.totalDebt !== undefined ? userData.totalDebt : aggregateDebt;
 
     const currentMonth = selectedDashMonth;
@@ -127,7 +219,11 @@ function App() {
     const daysInMonth = new Date(currentYear, currentMonthNum + 1, 0).getDate();
 
     const monthlySpending = transactions
-      .filter(t => t.date.startsWith(currentMonth) && (t.amount || 0) < 0)
+      .filter(t => t.date.startsWith(currentMonth) && (t.amount || 0) < 0 && t.type !== 'Internal Transfer')
+      .reduce((acc, curr) => acc + Math.abs(curr.amount || 0), 0);
+
+    const monthlyIncome = transactions
+      .filter(t => t.date.startsWith(currentMonth) && (t.amount || 0) > 0 && t.type !== 'Internal Transfer')
       .reduce((acc, curr) => acc + Math.abs(curr.amount || 0), 0);
 
     const baseSalary = userData.monthlySalary || 5000;
@@ -182,18 +278,18 @@ function App() {
     }
 
     const totalLoansOut = loans.reduce((acc, curr) => acc + (curr.remainingBalance || 0), 0);
-    const netWorth = (baseSalary - monthlySpending) + totalLoansOut - totalDebt;
+    const netWorth = (baseSalary + monthlyIncome - monthlySpending) + totalLoansOut - totalDebt;
 
     return {
       summary: {
-        remainingSalary: baseSalary - monthlySpending,
+        remainingSalary: baseSalary + monthlyIncome - monthlySpending,
         baseSalary: baseSalary,
-        remainingBudget: globalBudgetLimit - monthlySpending,
+        remainingBudget: globalBudgetLimit + monthlyIncome - monthlySpending,
         budgetLimit: globalBudgetLimit,
         debt: totalDebt,
         loansOut: totalLoansOut,
         netWorth: netWorth,
-        budgetUse: Math.min(Math.round((monthlySpending / globalBudgetLimit) * 100), 100)
+        budgetUse: Math.max(0, Math.min(Math.round((monthlySpending / ((globalBudgetLimit + monthlyIncome) || 1)) * 100), 100))
       },
       transactions: transactions.filter(t => t.date.startsWith(currentMonth)).slice(0, 5),
       monthlyHistory: monthlyHistory
@@ -295,6 +391,7 @@ function App() {
           currency={currency}
           onToggleCurrency={toggleCurrency}
           onSettingsClick={() => setIsSettingsOpen(true)}
+          onLogout={handleLogout}
         />
 
         <main className="flex-1 ml-64 min-h-screen">

@@ -1,8 +1,8 @@
 import React from 'react';
 import { NavLink } from 'react-router-dom';
-import { LayoutDashboard, ReceiptText, Wallet, CreditCard, Settings, LogOut, RefreshCw, HandCoins, PieChart } from 'lucide-react';
+import { LayoutDashboard, ReceiptText, Wallet, CreditCard, LogOut, RefreshCw, HandCoins, PieChart } from 'lucide-react';
 
-const Sidebar = ({ currency, onToggleCurrency, onSettingsClick }) => {
+const Sidebar = ({ currency, onToggleCurrency, onSettingsClick, onLogout }) => {
     const menuItems = [
         { icon: <LayoutDashboard size={20} />, label: 'Dashboard', path: '/' },
         { icon: <ReceiptText size={20} />, label: 'Transactions', path: '/transactions' },
@@ -52,13 +52,9 @@ const Sidebar = ({ currency, onToggleCurrency, onSettingsClick }) => {
                 </button>
 
                 <button
-                    onClick={onSettingsClick}
-                    className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium text-gray-500 hover:text-navy-primary hover:bg-gray-50 transition-colors"
+                    onClick={onLogout}
+                    className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 transition-colors"
                 >
-                    <Settings size={20} className="text-gray-400" />
-                    Fin Profile
-                </button>
-                <button className="w-full flex items-center gap-3 px-4 py-3 rounded-lg text-sm font-medium text-red-600 hover:bg-red-50 transition-colors">
                     <LogOut size={20} />
                     Logout
                 </button>

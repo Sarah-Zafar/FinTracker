@@ -5,7 +5,7 @@ import { collection, addDoc, doc, updateDoc, deleteDoc } from 'firebase/firestor
 
 const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
     const [isModalOpen, setIsModalOpen] = useState(false);
-    const [newCard, setNewCard] = useState({ name: '', limit: '', statement: '5th' });
+    const [newCard, setNewCard] = useState({ name: '', limit: '', limitLeft: '' });
 
     const symbol = currency === 'PKR' ? 'Rs.' : '$';
     const convert = (val) => currency === 'PKR' ? val * rate : val;
@@ -14,31 +14,33 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
         e.preventDefault();
         try {
             const limitUSD = currency === 'PKR' ? parseFloat(newCard.limit) / rate : parseFloat(newCard.limit);
+            const limitLeftUSD = currency === 'PKR' ? parseFloat(newCard.limitLeft) / rate : parseFloat(newCard.limitLeft);
 
             await addDoc(collection(db, "cards"), {
                 name: newCard.name,
-                limit: limitUSD,
-                spent: 0,
-                statementDate: newCard.statement
+                creditLimit: limitUSD,
+                limitLeft: limitLeftUSD,
+                paymentReceived: 0,
+                type: "Credit Card"
             });
 
             setIsModalOpen(false);
-            setNewCard({ name: '', limit: '', statement: '5th' });
+            setNewCard({ name: '', limit: '', limitLeft: '' });
         } catch (error) {
             console.error('Add card error:', error);
         }
     };
 
     const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-    const [editCard, setEditCard] = useState({ id: '', name: '', limit: '', statement: '5th' });
+    const [editCard, setEditCard] = useState({ id: '', name: '', limit: '', limitLeft: '' });
     const [confirming, setConfirming] = useState(null);
 
     const handleEditClick = (card) => {
         setEditCard({
             id: card.id,
             name: card.name,
-            limit: convert(card.limit).toString(),
-            statement: card.statementDate || '5th'
+            limit: convert(card.creditLimit || card.limit || 0).toString(),
+            limitLeft: convert(card.limitLeft || (card.limit - (card.spent || 0)) || 0).toString()
         });
         setIsEditModalOpen(true);
     };
@@ -47,11 +49,13 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
         e.preventDefault();
         try {
             const limitUSD = currency === 'PKR' ? parseFloat(editCard.limit) / rate : parseFloat(editCard.limit);
+            const limitLeftUSD = currency === 'PKR' ? parseFloat(editCard.limitLeft) / rate : parseFloat(editCard.limitLeft);
             const cardRef = doc(db, "cards", editCard.id);
             await updateDoc(cardRef, {
                 name: editCard.name,
-                limit: limitUSD,
-                statementDate: editCard.statement
+                creditLimit: limitUSD,
+                limitLeft: limitLeftUSD,
+                type: "Credit Card"
             });
             setIsEditModalOpen(false);
         } catch (error) {
@@ -97,7 +101,13 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-10">
                 {cards.map((card) => {
-                    const usagePercent = Math.min(Math.round(((card.spent || 0) / card.limit) * 100), 100);
+                    // Backwards compatibility with old cards
+                    const _creditLimit = card.creditLimit || card.limit || 0;
+                    const _limitLeft = card.limitLeft !== undefined ? card.limitLeft : (_creditLimit - (card.spent || 0));
+                    const _activeDebt = _creditLimit - _limitLeft;
+                    const _paymentReceived = card.paymentReceived || 0;
+
+                    const usagePercent = Math.min(Math.round((_activeDebt / (_creditLimit || 1)) * 100), 100);
                     const remainingColor = usagePercent > 80 ? 'text-red-500' : 'text-green-500';
 
                     return (
@@ -141,13 +151,13 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
                                         <div className="flex flex-col gap-2">
                                             <p className="text-[10px] font-black text-white/40 uppercase tracking-[0.3em]">Credit Capacity</p>
                                             <p className="text-2xl font-bold tracking-tighter">
-                                                {symbol}{convert(card.limit).toLocaleString()}
+                                                {symbol}{convert(_creditLimit).toLocaleString()}
                                             </p>
                                         </div>
                                         <div className="text-right flex flex-col gap-2">
-                                            <p className="text-[10px] font-black text-white/40 uppercase tracking-[0.3em]">Active Debt</p>
-                                            <p className={`text-4xl font-black tracking-tighter ${card.spent > 0 ? 'text-red-400' : 'text-white'}`}>
-                                                {symbol}{convert(card.spent || 0).toLocaleString(undefined, { minimumFractionDigits: 0 })}
+                                            <p className="text-[10px] font-black text-emerald-400 uppercase tracking-[0.3em]">Payment Received</p>
+                                            <p className={`text-4xl font-black tracking-tighter text-emerald-400`}>
+                                                {symbol}{convert(_paymentReceived).toLocaleString(undefined, { minimumFractionDigits: 0 })}
                                             </p>
                                         </div>
                                     </div>
@@ -175,13 +185,10 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
                                 </div>
 
                                 <div className="flex justify-between items-center text-[10px] font-black uppercase tracking-widest pt-2">
-                                    <div className="flex items-center gap-3 text-gray-400">
-                                        <Calendar size={18} />
-                                        <span>Cycle Starts: <b className="text-navy-primary">{card.statementDate}</b></span>
-                                    </div>
+                                    <div></div>
                                     <div className="flex gap-3 items-center">
-                                        <span className="text-gray-400">Net Exposure:</span>
-                                        <span className={`text-sm ${remainingColor}`}>{symbol}{convert(card.limit - (card.spent || 0)).toLocaleString()}</span>
+                                        <span className="text-gray-400">Limit Left:</span>
+                                        <span className={`text-sm ${remainingColor}`}>{symbol}{convert(_limitLeft).toLocaleString()}</span>
                                     </div>
                                 </div>
                             </div>
@@ -220,16 +227,14 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
                                         />
                                     </div>
                                     <div className="relative">
-                                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 ml-1">Cycle Date</label>
-                                        <select
-                                            value={newCard.statement}
-                                            onChange={(e) => setNewCard({ ...newCard, statement: e.target.value })}
-                                            className="w-full px-6 py-4.5 bg-gray-50 border border-gray-100 rounded-2xl outline-none font-black text-navy-primary appearance-none cursor-pointer transition-all uppercase"
-                                        >
-                                            <option value="5th">5th of Month</option>
-                                            <option value="15th">15th of Month</option>
-                                            <option value="25th">25th of Month</option>
-                                        </select>
+                                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 ml-1">Limit Left ({symbol})</label>
+                                        <input
+                                            type="number"
+                                            required
+                                            value={newCard.limitLeft}
+                                            onChange={(e) => setNewCard({ ...newCard, limitLeft: e.target.value })}
+                                            className="w-full px-6 py-4 bg-gray-50 border border-gray-100 rounded-2xl outline-none font-black text-navy-primary transition-all"
+                                        />
                                     </div>
                                 </div>
 
@@ -279,16 +284,14 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
                                         />
                                     </div>
                                     <div className="relative">
-                                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 ml-1">Cycle Date</label>
-                                        <select
-                                            value={editCard.statement}
-                                            onChange={(e) => setEditCard({ ...editCard, statement: e.target.value })}
-                                            className="w-full px-6 py-4.5 bg-white/5 border border-white/10 rounded-2xl outline-none font-black text-white appearance-none cursor-pointer transition-all uppercase"
-                                        >
-                                            <option value="5th" className="text-[#1a1f2e]">5th of Month</option>
-                                            <option value="15th" className="text-[#1a1f2e]">15th of Month</option>
-                                            <option value="25th" className="text-[#1a1f2e]">25th of Month</option>
-                                        </select>
+                                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 ml-1">Limit Left ({symbol})</label>
+                                        <input
+                                            type="number"
+                                            required
+                                            value={editCard.limitLeft}
+                                            onChange={(e) => setEditCard({ ...editCard, limitLeft: e.target.value })}
+                                            className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none font-black text-white transition-all"
+                                        />
                                     </div>
                                 </div>
 
