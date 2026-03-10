@@ -1,30 +1,101 @@
 import React, { useState } from 'react';
-import { PieChart, Target, Plus, Search, Trash2, AlertCircle } from 'lucide-react';
+import { PieChart, Target, Plus, Search, Trash2, AlertCircle, Pencil, Calendar, RefreshCw, Loader2 } from 'lucide-react';
 import CategoryModal from './CategoryModal';
 import { db } from '../firebase';
-import { doc, deleteDoc } from 'firebase/firestore';
+import { doc, deleteDoc, updateDoc, collection, addDoc } from 'firebase/firestore';
 
 const BudgetSegments = ({ currency, rate, externalTransactions, categories }) => {
+    const activeCurrentMonth = new Date().toISOString().split('-').slice(0, 2).join('-');
+    const [selectedMonth, setSelectedMonth] = useState(activeCurrentMonth);
+    const [isReplicating, setIsReplicating] = useState(false);
     const [isCatModalOpen, setIsCatModalOpen] = useState(false);
     const [search, setSearch] = useState('');
     const [confirming, setConfirming] = useState(null);
+    const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+    const [editSegment, setEditSegment] = useState({ id: '', name: '', limit: '' });
 
     const symbol = currency === 'PKR' ? 'Rs.' : '$';
     const convert = (val) => currency === 'PKR' ? val * rate : val;
 
-    const calculateCategoryStats = () => {
-        const currentMonth = new Date().toISOString().split('-').slice(0, 2).join('-');
-        const stats = categories.map(cat => {
-            const spent = externalTransactions
-                .filter(t => t.category === cat.name && t.date.startsWith(currentMonth) && (t.amount || 0) < 0)
-                .reduce((acc, curr) => acc + Math.abs(curr.amount || 0), 0);
-
-            return {
-                ...cat,
-                spent,
-                percent: cat.monthlyLimit > 0 ? Math.round((spent / cat.monthlyLimit) * 100) : 0
-            };
+    const handleEditClick = (cat) => {
+        setEditSegment({
+            id: cat.id,
+            name: cat.name,
+            limit: convert(cat.monthlyLimit || 0).toString()
         });
+        setIsEditModalOpen(true);
+    };
+
+    const handleUpdateSegment = async (e) => {
+        e.preventDefault();
+        try {
+            const limitUSD = currency === 'PKR' ? parseFloat(editSegment.limit) / rate : parseFloat(editSegment.limit);
+            const segmentRef = doc(db, "categories", editSegment.id);
+            await updateDoc(segmentRef, {
+                name: editSegment.name,
+                monthlyLimit: limitUSD
+            });
+            setIsEditModalOpen(false);
+        } catch (error) {
+            console.error('Update segment error:', error);
+        }
+    };
+
+    const handleReplicate = async () => {
+        const [yearStr, monthStr] = selectedMonth.split('-');
+        let year = parseInt(yearStr);
+        let month = parseInt(monthStr);
+
+        month -= 1;
+        if (month === 0) {
+            month = 12;
+            year -= 1;
+        }
+        const prevMonthStr = `${year}-${month.toString().padStart(2, '0')}`;
+
+        const prevCategories = categories.filter(cat => (cat.month || activeCurrentMonth) === prevMonthStr);
+
+        if (prevCategories.length === 0) {
+            alert(`No categories found in the previous month (${prevMonthStr}) to replicate.`);
+            return;
+        }
+
+        setIsReplicating(true);
+        try {
+            for (const cat of prevCategories) {
+                const exists = categories.some(c => c.name === cat.name && (c.month || activeCurrentMonth) === selectedMonth);
+                if (!exists) {
+                    await addDoc(collection(db, "categories"), {
+                        name: cat.name,
+                        type: cat.type || 'Expense',
+                        monthlyLimit: cat.monthlyLimit || 0,
+                        month: selectedMonth,
+                        createdAt: new Date().toISOString()
+                    });
+                }
+            }
+        } catch (err) {
+            console.error("Replication failed", err);
+            alert("Failed to replicate categories.");
+        } finally {
+            setIsReplicating(false);
+        }
+    };
+
+    const calculateCategoryStats = () => {
+        const stats = categories
+            .filter(cat => (cat.month || activeCurrentMonth) === selectedMonth)
+            .map(cat => {
+                const spent = externalTransactions
+                    .filter(t => t.category === cat.name && t.date.startsWith(selectedMonth) && (t.amount || 0) < 0)
+                    .reduce((acc, curr) => acc + Math.abs(curr.amount || 0), 0);
+
+                return {
+                    ...cat,
+                    spent,
+                    percent: cat.monthlyLimit > 0 ? Math.round((spent / cat.monthlyLimit) * 100) : 0
+                };
+            });
         return stats.filter(s => s.type === 'Expense');
     };
 
@@ -51,18 +122,37 @@ const BudgetSegments = ({ currency, rate, externalTransactions, categories }) =>
 
     return (
         <div className="p-8">
-            <header className="flex justify-between items-center mb-10">
+            <header className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 mb-10">
                 <div>
                     <h2 className="text-3xl font-black text-navy-primary tracking-tighter uppercase leading-none">Budget Segments</h2>
                     <p className="text-gray-400 mt-2 font-medium italic">Monitor sub-limit operational flows</p>
                 </div>
-                <div className="flex items-center gap-4">
+                <div className="flex flex-wrap items-center gap-4">
+                    <div className="relative group">
+                        <Calendar className="absolute left-6 top-1/2 -translate-y-1/2 text-navy-primary/40 group-focus-within:text-navy-primary transition-colors" size={18} />
+                        <input
+                            type="month"
+                            value={selectedMonth}
+                            onChange={(e) => setSelectedMonth(e.target.value)}
+                            className="bg-white pl-14 pr-6 py-4 border border-[#e5e7eb] rounded-[1.5rem] font-black text-navy-primary uppercase tracking-[0.2em] focus:outline-none focus:ring-4 focus:ring-navy-primary/5 transition-all text-xs outline-none cursor-pointer shadow-sm"
+                        />
+                    </div>
+
+                    <button
+                        onClick={handleReplicate}
+                        disabled={isReplicating}
+                        className="flex items-center gap-3 px-6 py-4 bg-white border border-[#e5e7eb] text-navy-primary rounded-[1.5rem] text-[10px] font-black uppercase tracking-[0.2em] hover:border-navy-primary hover:shadow-lg transition-all active:scale-[0.98] disabled:opacity-50 shadow-sm"
+                    >
+                        {isReplicating ? <Loader2 size={18} className="animate-spin" /> : <RefreshCw size={18} />}
+                        <span>{isReplicating ? 'Replicating...' : 'Replicate Last Month'}</span>
+                    </button>
+
                     <button
                         onClick={() => setIsCatModalOpen(true)}
-                        className="flex items-center gap-3 px-8 py-4 bg-[#1a1f2e] text-white rounded-[1.5rem] text-[10px] font-black uppercase tracking-[0.2em] shadow-2xl shadow-navy-primary/30 hover:scale-[1.02] active:scale-[0.98] transition-all"
+                        className="flex items-center gap-3 px-6 py-4 bg-[#1a1f2e] text-white rounded-[1.5rem] text-[10px] font-black uppercase tracking-[0.2em] shadow-2xl shadow-navy-primary/30 hover:scale-[1.02] active:scale-[0.98] transition-all"
                     >
                         <Plus size={20} />
-                        <span>New Segment</span>
+                        <span>New Category</span>
                     </button>
                 </div>
             </header>
@@ -88,13 +178,21 @@ const BudgetSegments = ({ currency, rate, externalTransactions, categories }) =>
                                     <div className="w-full">
                                         <div className="flex justify-between items-center w-full mb-3">
                                             <h4 className="text-[12px] font-black text-gray-800 uppercase tracking-[0.2em]">{stat.name}</h4>
-                                            <button
-                                                onClick={() => handleDelete(stat)}
-                                                className={`p-2 rounded-xl transition-all duration-300 ${confirming === stat.id ? 'bg-rose-500 text-white shadow-lg animate-pulse scale-105' : 'text-rose-200 hover:text-rose-500 bg-transparent hover:bg-rose-50'}`}
-                                            >
-                                                {confirming === stat.id && <span className="text-[9px] font-black uppercase leading-none mr-1 inline-block">Confirm?</span>}
-                                                <Trash2 size={confirming === stat.id ? 14 : 18} />
-                                            </button>
+                                            <div className="flex items-center gap-2">
+                                                <button
+                                                    onClick={() => handleEditClick(stat)}
+                                                    className="p-2 rounded-xl transition-colors text-gray-300 hover:text-navy-primary hover:bg-gray-50"
+                                                >
+                                                    <Pencil size={18} />
+                                                </button>
+                                                <button
+                                                    onClick={() => handleDelete(stat)}
+                                                    className={`p-2 rounded-xl transition-all duration-300 ${confirming === stat.id ? 'bg-rose-500 text-white shadow-lg animate-pulse scale-105' : 'text-rose-200 hover:text-rose-500 bg-transparent hover:bg-rose-50'}`}
+                                                >
+                                                    {confirming === stat.id && <span className="text-[9px] font-black uppercase leading-none mr-1 inline-block">Confirm?</span>}
+                                                    <Trash2 size={confirming === stat.id ? 14 : 18} />
+                                                </button>
+                                            </div>
                                         </div>
                                         <div className="space-y-1">
                                             <p className="text-xl font-black text-navy-primary tracking-tighter">
@@ -136,7 +234,53 @@ const BudgetSegments = ({ currency, rate, externalTransactions, categories }) =>
                 onClose={() => setIsCatModalOpen(false)}
                 currency={currency}
                 rate={rate}
+                selectedMonth={selectedMonth}
             />
+
+            {isEditModalOpen && (
+                <div className="fixed inset-0 z-[60] flex items-center justify-center bg-[#1a1f2e]/80 backdrop-blur-md px-4 text-left">
+                    <div className="bg-[#1a1f2e] border border-white/10 rounded-[2.5rem] shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-300">
+                        <div className="p-10">
+                            <h2 className="text-2xl font-black text-white mb-10 tracking-tighter uppercase">Edit Budget Segment</h2>
+                            <form onSubmit={handleUpdateSegment} className="space-y-8">
+                                <div>
+                                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-3 ml-1">Segment Name</label>
+                                    <input
+                                        type="text"
+                                        required
+                                        value={editSegment.name}
+                                        onChange={(e) => setEditSegment({ ...editSegment, name: e.target.value })}
+                                        className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl focus:ring-4 focus:ring-white/5 focus:border-white/20 outline-none font-black text-white transition-all placeholder:text-gray-600"
+                                    />
+                                </div>
+
+                                <div>
+                                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-3 ml-1">Monthly Budget ({symbol})</label>
+                                    <input
+                                        type="number"
+                                        required
+                                        value={editSegment.limit}
+                                        onChange={(e) => setEditSegment({ ...editSegment, limit: e.target.value })}
+                                        className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none font-black text-white transition-all placeholder:text-gray-600"
+                                    />
+                                </div>
+
+                                <div className="flex gap-4 pt-4">
+                                    <button
+                                        type="button"
+                                        onClick={() => setIsEditModalOpen(false)}
+                                        className="flex-1 py-4 bg-white/5 border border-white/10 text-white/50 rounded-[1.5rem] font-black uppercase text-[10px] tracking-widest hover:bg-white/10 transition-all cursor-pointer"
+                                    >Cancel</button>
+                                    <button
+                                        type="submit"
+                                        className="flex-2 py-4 bg-emerald-500 text-white rounded-[1.5rem] font-black uppercase text-[10px] tracking-widest shadow-xl shadow-emerald-500/20 hover:scale-[1.02] active:scale-[0.98] transition-all cursor-pointer"
+                                    >Save Changes</button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

@@ -30,6 +30,8 @@ function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(localStorage.getItem('fintrackerAuth') === 'true');
   const [pin, setPin] = useState('');
   const [shake, setShake] = useState(false);
+  const activeCurrentMonth = new Date().toISOString().split('-').slice(0, 2).join('-');
+  const [selectedDashMonth, setSelectedDashMonth] = useState(activeCurrentMonth);
 
   const CONVERSION_RATE = 280;
 
@@ -119,7 +121,7 @@ function App() {
     const aggregateDebt = cards.reduce((acc, curr) => acc + (curr.spent || 0), 0);
     const totalDebt = userData.totalDebt !== undefined ? userData.totalDebt : aggregateDebt;
 
-    const currentMonth = new Date().toISOString().split('-').slice(0, 2).join('-');
+    const currentMonth = selectedDashMonth;
     const currentYear = new Date().getFullYear();
     const currentMonthNum = new Date().getMonth();
     const daysInMonth = new Date(currentYear, currentMonthNum + 1, 0).getDate();
@@ -193,7 +195,7 @@ function App() {
         netWorth: netWorth,
         budgetUse: Math.min(Math.round((monthlySpending / globalBudgetLimit) * 100), 100)
       },
-      transactions: transactions.slice(0, 5),
+      transactions: transactions.filter(t => t.date.startsWith(currentMonth)).slice(0, 5),
       monthlyHistory: monthlyHistory
     };
   };
@@ -313,7 +315,7 @@ function App() {
                   currency={currency}
                   rate={CONVERSION_RATE}
                   onAddClick={() => setIsModalOpen(true)}
-                  externalTransactions={transactions}
+                  externalTransactions={transactions.filter(t => t.date.startsWith(selectedDashMonth))}
                   categories={categories}
                   onDeleteTransaction={handleDeleteTransaction}
                 />
@@ -357,6 +359,8 @@ function App() {
                   onAddClick={() => setIsModalOpen(true)}
                   onUpdateUserField={handleUpdateUserField}
                   onDeleteTransaction={handleDeleteTransaction}
+                  selectedMonth={selectedDashMonth}
+                  onMonthChange={setSelectedDashMonth}
                 />
               } />
             </Routes>

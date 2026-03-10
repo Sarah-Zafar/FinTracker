@@ -198,13 +198,16 @@ const TransactionModal = ({ isOpen, onClose, currency, rate, categories, banks, 
                                     className="w-full px-5 py-4 bg-gray-50 border border-gray-100 rounded-xl outline-none appearance-none font-black text-[#1a1f2e] cursor-pointer hover:border-[#1a1f2e] text-sm uppercase"
                                     required
                                 >
-                                    {categories.length > 0 ? (
-                                        categories.map(cat => (
-                                            <option key={cat.id} value={cat.name}>{cat.name}</option>
-                                        ))
-                                    ) : (
-                                        <option disabled>Syncing Cloud...</option>
-                                    )}
+                                    {(() => {
+                                        const uniqueCategories = Array.from(new Map(categories.map(c => [c.name, c])).values());
+                                        return uniqueCategories.length > 0 ? (
+                                            uniqueCategories.map(cat => (
+                                                <option key={cat.id} value={cat.name}>{cat.name}</option>
+                                            ))
+                                        ) : (
+                                            <option disabled>Syncing Cloud...</option>
+                                        );
+                                    })()}
                                 </select>
                                 <div className="absolute right-5 top-11 pointer-events-none text-gray-300">
                                     <ChevronDown size={18} />

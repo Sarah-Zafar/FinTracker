@@ -3,7 +3,7 @@ import { X, Plus, Tag, Loader2, Target, ShieldCheck } from 'lucide-react';
 import { db } from '../firebase'
 import { collection, addDoc } from 'firebase/firestore'
 
-const CategoryModal = ({ isOpen, onClose, currency, rate }) => {
+const CategoryModal = ({ isOpen, onClose, currency, rate, selectedMonth }) => {
     const [name, setName] = useState('');
     const [type, setType] = useState('Expense');
     const [limit, setLimit] = useState('');
@@ -20,13 +20,14 @@ const CategoryModal = ({ isOpen, onClose, currency, rate }) => {
         setError('');
 
         try {
-            // Store limit as base USD if input is PKR
             const limitUSD = currency === 'PKR' ? parseFloat(limit || 0) / rate : parseFloat(limit || 0);
+            const currentMonth = new Date().toISOString().split('-').slice(0, 2).join('-');
 
             await addDoc(collection(db, "categories"), {
                 name: name.trim(),
                 type,
                 monthlyLimit: limitUSD,
+                month: selectedMonth || currentMonth,
                 createdAt: new Date().toISOString()
             });
 
@@ -53,7 +54,7 @@ const CategoryModal = ({ isOpen, onClose, currency, rate }) => {
                             <div className="p-3 bg-navy-primary/5 rounded-2xl text-navy-primary">
                                 <Target size={24} />
                             </div>
-                            <h2 className="text-2xl font-black text-navy-primary tracking-tighter uppercase">New Budget Class</h2>
+                            <h2 className="text-2xl font-black text-navy-primary tracking-tighter uppercase">New Category</h2>
                         </div>
                         <button onClick={onClose} className="p-2 hover:bg-gray-100 rounded-2xl text-gray-400 transition-colors">
                             <X size={24} />
@@ -64,7 +65,7 @@ const CategoryModal = ({ isOpen, onClose, currency, rate }) => {
                         {error && <p className="p-4 bg-red-50 text-red-600 rounded-2xl text-[10px] font-black tracking-widest text-center border border-red-100 uppercase uppercase">{error}</p>}
 
                         <div className="relative group">
-                            <label className="block text-[10px] font-black text-gray-400 mb-4 uppercase tracking-[0.3em] pl-1">Classification Name</label>
+                            <label className="block text-[10px] font-black text-gray-400 mb-4 uppercase tracking-[0.3em] pl-1">Transaction Name</label>
                             <div className="relative">
                                 <div className="absolute left-5 top-1/2 -translate-y-1/2 text-navy-primary/20 group-focus-within:text-navy-primary transition-colors">
                                     <Tag size={20} />
@@ -82,7 +83,7 @@ const CategoryModal = ({ isOpen, onClose, currency, rate }) => {
 
                         <div className="grid grid-cols-2 gap-6">
                             <div>
-                                <label className="block text-[10px] font-black text-gray-400 mb-4 uppercase tracking-[0.3em] pl-1">Monthly Ceiling ({symbol})</label>
+                                <label className="block text-[10px] font-black text-gray-400 mb-4 uppercase tracking-[0.3em] pl-1">Monthly Budget ({symbol})</label>
                                 <input
                                     type="number"
                                     value={limit}
@@ -92,7 +93,7 @@ const CategoryModal = ({ isOpen, onClose, currency, rate }) => {
                                 />
                             </div>
                             <div>
-                                <label className="block text-[10px] font-black text-gray-400 mb-4 uppercase tracking-[0.3em] pl-1">Fiscal Flow</label>
+                                <label className="block text-[10px] font-black text-gray-400 mb-4 uppercase tracking-[0.3em] pl-1">Transaction Type</label>
                                 <div className="flex bg-gray-50 p-1.5 rounded-2xl border border-gray-100">
                                     {['Expense', 'Income'].map((t) => (
                                         <button
@@ -117,7 +118,7 @@ const CategoryModal = ({ isOpen, onClose, currency, rate }) => {
                             className="w-full py-5.5 bg-[#1a1f2e] text-white rounded-[1.5rem] font-bold shadow-2xl shadow-navy-primary/30 hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center justify-center gap-3 disabled:opacity-50"
                         >
                             {isSaving ? <Loader2 className="animate-spin" /> : <ShieldCheck size={20} />}
-                            <span className="tracking-[0.4em] uppercase font-black text-xs">{isSaving ? 'Synching Cloud...' : 'Commit Section'}</span>
+                            <span className="tracking-[0.4em] uppercase font-black text-xs">{isSaving ? 'Saving...' : 'Save'}</span>
                         </button>
                     </form>
                 </div>
