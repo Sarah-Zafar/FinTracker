@@ -12,7 +12,7 @@ const BudgetSegments = ({ currency, rate, externalTransactions, categories }) =>
     const [search, setSearch] = useState('');
     const [confirming, setConfirming] = useState(null);
     const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-    const [editSegment, setEditSegment] = useState({ id: '', name: '', limit: '' });
+    const [editSegment, setEditSegment] = useState({ id: '', name: '', limit: '', type: 'Expense', spent: '', received: '' });
 
     const symbol = currency === 'PKR' ? 'Rs.' : '$';
     const convert = (val) => currency === 'PKR' ? val * rate : val;
@@ -21,7 +21,10 @@ const BudgetSegments = ({ currency, rate, externalTransactions, categories }) =>
         setEditSegment({
             id: cat.id,
             name: cat.name,
-            limit: convert(cat.monthlyLimit || 0).toString()
+            limit: convert(cat.monthlyLimit || 0).toString(),
+            type: cat.type || 'Expense',
+            spent: convert(cat.spent || 0).toString(),
+            received: convert(cat.received || 0).toString()
         });
         setIsEditModalOpen(true);
     };
@@ -30,11 +33,22 @@ const BudgetSegments = ({ currency, rate, externalTransactions, categories }) =>
         e.preventDefault();
         try {
             const limitUSD = currency === 'PKR' ? parseFloat(editSegment.limit) / rate : parseFloat(editSegment.limit);
+            const spentUSD = currency === 'PKR' ? parseFloat(editSegment.spent || 0) / rate : parseFloat(editSegment.spent || 0);
+            const receivedUSD = currency === 'PKR' ? parseFloat(editSegment.received || 0) / rate : parseFloat(editSegment.received || 0);
+
             const segmentRef = doc(db, "categories", editSegment.id);
-            await updateDoc(segmentRef, {
+            const updates = {
                 name: editSegment.name,
                 monthlyLimit: limitUSD
-            });
+            };
+
+            if (editSegment.type === 'Income') {
+                updates.received = receivedUSD;
+            } else {
+                updates.spent = spentUSD;
+            }
+
+            await updateDoc(segmentRef, updates);
             setIsEditModalOpen(false);
         } catch (error) {
             console.error('Update segment error:', error);
@@ -274,7 +288,7 @@ const BudgetSegments = ({ currency, rate, externalTransactions, categories }) =>
                                 </div>
 
                                 <div>
-                                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-3 ml-1">Monthly Budget ({symbol})</label>
+                                    <label className="block text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-3 ml-1">Monthly Target/Limit ({symbol})</label>
                                     <input
                                         type="number"
                                         required
@@ -283,6 +297,30 @@ const BudgetSegments = ({ currency, rate, externalTransactions, categories }) =>
                                         className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none font-black text-white transition-all placeholder:text-gray-600"
                                     />
                                 </div>
+
+                                {editSegment.type === 'Income' ? (
+                                    <div>
+                                        <label className="block text-[10px] font-black text-emerald-400 uppercase tracking-[0.2em] mb-3 ml-1">Amount Received ({symbol})</label>
+                                        <input
+                                            type="number"
+                                            required
+                                            value={editSegment.received}
+                                            onChange={(e) => setEditSegment({ ...editSegment, received: e.target.value })}
+                                            className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none font-black text-white transition-all placeholder:text-gray-600"
+                                        />
+                                    </div>
+                                ) : (
+                                    <div>
+                                        <label className="block text-[10px] font-black text-rose-400 uppercase tracking-[0.2em] mb-3 ml-1">Amount Spent ({symbol})</label>
+                                        <input
+                                            type="number"
+                                            required
+                                            value={editSegment.spent}
+                                            onChange={(e) => setEditSegment({ ...editSegment, spent: e.target.value })}
+                                            className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none font-black text-white transition-all placeholder:text-gray-600"
+                                        />
+                                    </div>
+                                )}
 
                                 <div className="flex gap-4 pt-4">
                                     <button

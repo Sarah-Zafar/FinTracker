@@ -32,7 +32,7 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
     };
 
     const [isEditModalOpen, setIsEditModalOpen] = useState(false);
-    const [editCard, setEditCard] = useState({ id: '', name: '', limit: '', limitLeft: '' });
+    const [editCard, setEditCard] = useState({ id: '', name: '', limit: '', limitLeft: '', paymentReceived: '' });
     const [confirming, setConfirming] = useState(null);
 
     const handleEditClick = (card) => {
@@ -40,7 +40,8 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
             id: card.id,
             name: card.name,
             limit: convert(card.creditLimit || card.limit || 0).toString(),
-            limitLeft: convert(card.limitLeft || (card.limit - (card.spent || 0)) || 0).toString()
+            limitLeft: convert(card.limitLeft || (card.limit - (card.spent || 0)) || 0).toString(),
+            paymentReceived: convert(card.paymentReceived || 0).toString()
         });
         setIsEditModalOpen(true);
     };
@@ -50,11 +51,14 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
         try {
             const limitUSD = currency === 'PKR' ? parseFloat(editCard.limit) / rate : parseFloat(editCard.limit);
             const limitLeftUSD = currency === 'PKR' ? parseFloat(editCard.limitLeft) / rate : parseFloat(editCard.limitLeft);
+            const paymentReceivedUSD = currency === 'PKR' ? parseFloat(editCard.paymentReceived || 0) / rate : parseFloat(editCard.paymentReceived || 0);
+
             const cardRef = doc(db, "cards", editCard.id);
             await updateDoc(cardRef, {
                 name: editCard.name,
                 creditLimit: limitUSD,
                 limitLeft: limitLeftUSD,
+                paymentReceived: paymentReceivedUSD,
                 type: "Credit Card"
             });
             setIsEditModalOpen(false);
@@ -272,7 +276,7 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
                                     />
                                 </div>
 
-                                <div className="grid grid-cols-2 gap-6">
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                                     <div className="relative">
                                         <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 ml-1">Credit Limit ({symbol})</label>
                                         <input
@@ -290,6 +294,16 @@ const CreditCards = ({ currency, rate, cards, transactions = [] }) => {
                                             required
                                             value={editCard.limitLeft}
                                             onChange={(e) => setEditCard({ ...editCard, limitLeft: e.target.value })}
+                                            className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none font-black text-white transition-all"
+                                        />
+                                    </div>
+                                    <div className="relative">
+                                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-3 ml-1">Payment Received ({symbol})</label>
+                                        <input
+                                            type="number"
+                                            required
+                                            value={editCard.paymentReceived}
+                                            onChange={(e) => setEditCard({ ...editCard, paymentReceived: e.target.value })}
                                             className="w-full px-6 py-4 bg-white/5 border border-white/10 rounded-2xl outline-none font-black text-white transition-all"
                                         />
                                     </div>
